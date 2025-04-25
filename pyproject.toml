@@ -1,0 +1,14 @@
+[project]
+name = "openwebui-watcher"
+version = "0.2.9"
+description = "Sync local file changes to OpenWebUI knowledge base"
+authors = [{ name = "Your Name", email = "your@email.com" }]
+dependencies = [
+    "requests",
+    "python-dotenv",
+    "watchdog"
+]
+requires-python = ">=3.8"
+
+[project.scripts]
+openwebui-watcher = "openwebui_watcher.cli:main"

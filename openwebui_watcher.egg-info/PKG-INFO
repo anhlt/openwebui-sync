@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: openwebui-watcher
+Version: 0.2.9
+Summary: Sync local file changes to OpenWebUI knowledge base
+Author-email: Your Name <your@email.com>
+Requires-Python: >=3.8
+Requires-Dist: requests
+Requires-Dist: python-dotenv
+Requires-Dist: watchdog

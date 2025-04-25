@@ -1,0 +1,9 @@
+pyproject.toml
+openwebui_watcher/__init__.py
+openwebui_watcher/cli.py
+openwebui_watcher.egg-info/PKG-INFO
+openwebui_watcher.egg-info/SOURCES.txt
+openwebui_watcher.egg-info/dependency_links.txt
+openwebui_watcher.egg-info/entry_points.txt
+openwebui_watcher.egg-info/requires.txt
+openwebui_watcher.egg-info/top_level.txt
