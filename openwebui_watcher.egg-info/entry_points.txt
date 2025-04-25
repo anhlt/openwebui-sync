@@ -1,2 +1,0 @@
-[console_scripts]
-openwebui-watcher = openwebui_watcher.cli:main
