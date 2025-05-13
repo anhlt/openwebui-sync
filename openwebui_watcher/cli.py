@@ -3,6 +3,7 @@ import time
 import json
 import logging
 import requests
+import mimetypes
 
 UPLOAD_DB_FILE = ".upload.json"
 LOG_PATH = "/tmp/openwebui_watcher.log"
@@ -16,6 +17,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("openwebui_watcher")
+
 
 API_KEY = os.getenv("OPENWEBUI_API_KEY")
 API_URL = os.getenv("OPENWEBUI_API_URL")
@@ -33,6 +35,7 @@ else:
 
 UPLOAD_ENDPOINT = f"{API_URL}/api/v1/files/"
 ADD_FILE_TO_KNOWLEDGE_ENDPOINT = f"{API_URL}/api/v1/knowledge/{KNOWLEDGE_ID}/file/add"
+UPDATE_FILE_CONTENT_ENDPOINT_TEMPLATE = f"{API_URL}/api/v1/files/{{file_id}}/data/content/update"
 
 
 def has_allowed_extension(file_path):
@@ -61,41 +64,61 @@ def save_upload_db(db):
         logger.error(f"Failed to save upload database {UPLOAD_DB_FILE}: {e}")
 
 
-def build_upload_filename(file_path, root_dir):
+def build_upload_filename(file_path, root_dir, upload_db):
     """
-    Converts file's path to uploaded filename with full path encoding:
-    e.g. 'foo/bar/baz.txt' -> 'foo__bar__baz.txt'
-    Only path relative to root_dir is used.
+    Returns upload filename.
+    Uses plain filename if unique in upload_db,
+    otherwise prefixes immediate parent directory with __.
     """
     abs_root = os.path.abspath(root_dir)
     abs_file = os.path.abspath(file_path)
     rel_path = os.path.relpath(abs_file, abs_root)
-    parts = rel_path.split(os.sep)
-    # Join all parts except last with '__' + filename
-    if len(parts) == 1:
-        # File in root folder
-        upload_filename = parts[0]
+    filename = os.path.basename(file_path)
+
+    # Check for duplicates
+    duplicates = [
+        path for path in upload_db.keys()
+        if os.path.basename(path) == filename and path != abs_file
+    ]
+
+    if not duplicates:
+        return filename
     else:
-        upload_filename = "__".join(parts[:-1]) + "__" + parts[-1]
-    return upload_filename
+        parts = rel_path.split(os.sep)
+        if len(parts) >= 2:
+            parent_folder = parts[-2]
+            return f"{parent_folder}__{filename}"
+        else:
+            return filename
 
 
-def upload_file(file_path, root_dir="."):
+def upload_file(file_path, root_dir=".", upload_db=None):
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Accept": "application/json"
     }
-    upload_filename = build_upload_filename(file_path, root_dir)
+
+    if upload_db is None:
+        upload_db = {}
+
+    upload_filename = build_upload_filename(file_path, root_dir, upload_db)
     logger.info(f"Uploading '{file_path}' as '{upload_filename}'")
 
+    mime_type, _ = mimetypes.guess_type(file_path)
+    if not mime_type:
+        mime_type = "application/octet-stream"
+
     with open(file_path, "rb") as f:
-        files = {'file': (upload_filename, f)}
+        files = {'file': (upload_filename, f, mime_type, {})}
+        # The last dict is extra headers per file part; empty dict here
         resp = requests.post(UPLOAD_ENDPOINT, headers=headers, files=files)
+
     resp.raise_for_status()
     resp_json = resp.json()
+
     file_id = resp_json.get("id") or resp_json.get("data", {}).get("id")
     if not file_id:
-        logger.error(f"Failed to get file id from: {resp_json}")
+        logger.error(f"Failed to get file id from upload response: {resp_json}")
         return None
     logger.info(f"Uploaded {file_path} as {upload_filename} with id {file_id}")
     return file_id
@@ -127,6 +150,40 @@ def add_file_to_knowledge(file_id):
     return resp.json()
 
 
+def update_file_content(file_id, file_path):
+    url = UPDATE_FILE_CONTENT_ENDPOINT_TEMPLATE.format(file_id=file_id)
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except UnicodeDecodeError:
+        # Could not decode as text, fallback to binary update is not possible via this API
+        logger.error(f"Failed to read file {file_path} as UTF-8 text for content update; skipping update")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to read file {file_path} for content update: {e}")
+        return False
+
+    data = {"content": content}
+
+    logger.info(f"Updating content for file id {file_id} from {file_path}")
+    resp = requests.post(url, headers=headers, json=data)
+    logger.info(f"Update content response code: {resp.status_code}")
+    logger.info(f"Update content response content: {resp.text}")
+    try:
+        resp.raise_for_status()
+        logger.info(f"Successfully updated content for file id {file_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to update content for file id {file_id}: {e}")
+        return False
+
+
 def scan_and_sync(scan_dir=".", sleep_period=30):
     upload_db = load_upload_db()
     logger.info("Starting continuous sync loop")
@@ -138,21 +195,41 @@ def scan_and_sync(scan_dir=".", sleep_period=30):
                 file_path = os.path.abspath(os.path.join(root, fname))
                 if not has_allowed_extension(file_path):
                     continue
+
                 try:
                     mtime = os.path.getmtime(file_path)
                 except Exception as e:
                     logger.error(f"Failed to get mtime for {file_path}: {e}")
                     continue
+
                 record = upload_db.get(file_path)
+
+                # New file or modified file
                 if not record or record.get("mtime") != mtime:
+
                     try:
-                        file_id = upload_file(file_path, root_dir=scan_dir)
-                        if file_id:
-                            add_file_to_knowledge(file_id)
-                            upload_db[file_path] = {"mtime": mtime, "file_id": file_id}
-                            updated = True
+                        if record and "file_id" in record:
+                            # Update existing file content
+                            success = update_file_content(record["file_id"], file_path)
+                            if not success:
+                                # On failure fallback to reupload
+                                file_id = upload_file(file_path, root_dir=scan_dir, upload_db=upload_db)
+                                if file_id:
+                                    add_file_to_knowledge(file_id)
+                                    upload_db[file_path] = {"mtime": mtime, "file_id": file_id}
+                                    updated = True
+                            else:
+                                upload_db[file_path]["mtime"] = mtime
+                                updated = True
+                        else:
+                            # New file: upload and add to knowledge
+                            file_id = upload_file(file_path, root_dir=scan_dir, upload_db=upload_db)
+                            if file_id:
+                                add_file_to_knowledge(file_id)
+                                upload_db[file_path] = {"mtime": mtime, "file_id": file_id}
+                                updated = True
                     except Exception as e:
-                        logger.error(f"Error uploading or adding {file_path}: {e}")
+                        logger.error(f"Error updating or uploading {file_path}: {e}")
 
         if updated:
             save_upload_db(upload_db)
@@ -161,19 +238,3 @@ def scan_and_sync(scan_dir=".", sleep_period=30):
 
 def main():
     scan_and_sync(".")
-
-
-
-# def main():
-#     path = "."
-#     event_handler = FileChangeHandler()
-#     observer = Observer()
-#     observer.schedule(event_handler, path, recursive=True)
-#     observer.start()
-#     logger.info(f"Watching {os.path.abspath(path)} for changes...")
-#     try:
-#         while True:
-#             time.sleep(1)
-#     except KeyboardInterrupt:
-#         observer.stop()
-#     observer.join()

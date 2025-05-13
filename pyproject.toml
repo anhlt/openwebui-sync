@@ -1,6 +1,6 @@
 [project]
 name = "openwebui-watcher"
-version = "0.2.10"
+version = "0.2.14"
 description = "Sync local file changes to OpenWebUI knowledge base"
 authors = [{ name = "Your Name", email = "your@email.com" }]
 dependencies = [
