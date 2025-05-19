@@ -4,6 +4,7 @@ import json
 import logging
 import requests
 import mimetypes
+import pathspec
 
 UPLOAD_DB_FILE = ".upload.json"
 LOG_PATH = "/tmp/openwebui_watcher.log"
@@ -184,15 +185,31 @@ def update_file_content(file_id, file_path):
         return False
 
 
+def load_gitignore_patterns(scan_dir):
+    gitignore_path = os.path.join(scan_dir, ".gitignore")
+    if os.path.exists(gitignore_path):
+        with open(gitignore_path, "r") as f:
+            patterns = f.read().splitlines()
+        return pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+    return None
+
+
 def scan_and_sync(scan_dir=".", sleep_period=30):
     upload_db = load_upload_db()
     logger.info("Starting continuous sync loop")
+
+    gitignore_spec = load_gitignore_patterns(scan_dir)
 
     while True:
         updated = False
         for root, dirs, files in os.walk(scan_dir):
             for fname in files:
                 file_path = os.path.abspath(os.path.join(root, fname))
+                # Check if file is ignored by gitignore
+                if gitignore_spec and gitignore_spec.match_file(os.path.relpath(file_path, scan_dir)):
+                    logger.info(f"Skipping ignored file: {file_path}")
+                    continue
+
                 if not has_allowed_extension(file_path):
                     continue
 
